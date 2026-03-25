@@ -4,6 +4,7 @@ const APP_CONFIG = window.__APP_CONFIG__ || {};
 
 const startMenu = document.getElementById("startMenu");
 const startButton = document.getElementById("startButton");
+const nameInput = document.getElementById("nameInput");
 const resetButton = document.getElementById("resetButton");
 const inviteButton = document.getElementById("inviteButton");
 const connectingBanner = document.getElementById("connecting");
@@ -26,10 +27,12 @@ canvas.tabIndex = 0;
 const GRID_SIZE = 30;
 const WORLD_WIDTH = 7200;
 const WORLD_HEIGHT = 5200;
-const ARENA = { x: WORLD_WIDTH / 2, y: WORLD_HEIGHT / 2, radius: 1550 };
+const ARENA = { x: WORLD_WIDTH / 2, y: WORLD_HEIGHT / 2, radius: 1120 };
 const PLAYER_RADIUS = 46;
 const PLAYER_SPEED = 150;
 const BOOST_MULTIPLIER = 1.2;
+const BOOST_BURST_MS = 450;
+const BOOST_COOLDOWN_MS = 3000;
 const POSITION_LERP_SECONDS = 0.175;
 const MOVEMENT_RAMP_SECONDS = 0.42;
 const NORMAL_ACCEL = 10;
@@ -56,6 +59,9 @@ const state = {
   phase: "menu",
   lastFrame: 0,
   pixelRatio: 1,
+  profile: {
+    name: "Dragon"
+  },
   viewport: { width: window.innerWidth, height: window.innerHeight },
   pointer: {
     screenX: 0,
@@ -157,6 +163,8 @@ function createDragon(seed = {}) {
     maxWater,
     baseSpeed: Number.isFinite(seed.baseSpeed) ? seed.baseSpeed : PLAYER_SPEED,
     boosting: false,
+    boostActiveUntil: Number.isFinite(seed.boostActiveUntil) ? seed.boostActiveUntil : 0,
+    boostCooldownUntil: Number.isFinite(seed.boostCooldownUntil) ? seed.boostCooldownUntil : 0,
     boostVisual: Number.isFinite(seed.boostVisual) ? seed.boostVisual : 0,
     healVisual: Number.isFinite(seed.healVisual) ? seed.healVisual : 0,
     hurtVisual: 0,
@@ -180,6 +188,64 @@ function createDragon(seed = {}) {
     nRadius: radius,
     updateTime: performance.now()
   };
+}
+
+function sanitizeName(value) {
+  const trimmed = String(value || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 18);
+
+  return trimmed || "Dragon";
+}
+
+function persistPlayerName() {
+  try {
+    window.localStorage.setItem("dragon_duel_name", state.profile.name);
+  } catch (_error) {
+    // Ignore storage failures in private/incognito or locked-down browsers.
+  }
+}
+
+function applyPlayerName(nextName) {
+  state.profile.name = sanitizeName(nextName);
+
+  if (nameInput && nameInput.value !== state.profile.name) {
+    nameInput.value = state.profile.name;
+  }
+
+  if (state.player) {
+    state.player.name = state.profile.name;
+  }
+
+  persistPlayerName();
+}
+
+function hydratePlayerName() {
+  let savedName = "Dragon";
+
+  try {
+    savedName = window.localStorage.getItem("dragon_duel_name") || savedName;
+  } catch (_error) {
+    // Ignore storage failures and keep the default name.
+  }
+
+  applyPlayerName(savedName);
+}
+
+function canTriggerBoost(dragon, now = performance.now()) {
+  return Boolean(
+    dragon &&
+    dragon.water > 0.5 &&
+    now >= dragon.boostCooldownUntil
+  );
+}
+
+function activateBoostBurst(dragon, now = performance.now()) {
+  dragon.boostActiveUntil = now + BOOST_BURST_MS;
+  dragon.boostCooldownUntil = now + BOOST_COOLDOWN_MS;
+  dragon.boosting = true;
+  dragon.boostVisual = Math.max(dragon.boostVisual, 0.72);
 }
 
 function healthRatio(dragon) {
@@ -268,6 +334,7 @@ function syncRemoteDragon(current, snapshot, defaults = {}) {
 
   dragon.vx = Number.isFinite(mergedSnapshot.vx) ? mergedSnapshot.vx : dragon.vx;
   dragon.vy = Number.isFinite(mergedSnapshot.vy) ? mergedSnapshot.vy : dragon.vy;
+  dragon.name = typeof mergedSnapshot.name === "string" ? sanitizeName(mergedSnapshot.name) : dragon.name;
   dragon.health = Number.isFinite(mergedSnapshot.health) ? mergedSnapshot.health : dragon.health;
   dragon.maxHealth = Number.isFinite(mergedSnapshot.maxHealth) ? mergedSnapshot.maxHealth : dragon.maxHealth;
   dragon.water = Number.isFinite(mergedSnapshot.water) ? mergedSnapshot.water : dragon.water;
@@ -513,7 +580,9 @@ function clampToArena(dragon) {
 }
 
 function spawnDragon() {
-  state.player = createDragon();
+  state.player = createDragon({
+    name: state.profile.name
+  });
   syncDragonStatusBars(state.player, { healed: true });
   state.opponent = null;
   state.phase = "running";
@@ -566,7 +635,8 @@ function updateLocalDragon(dt) {
 
   const direction = normalize(targetX - dragon.x, targetY - dragon.y);
   const distance = direction.length;
-  const wantsBoost = state.input.boost && dragon.water > 0.5;
+  const now = performance.now();
+  const wantsBoost = now < dragon.boostActiveUntil && dragon.water > 0.5;
   const maxSpeed = dragon.baseSpeed * (wantsBoost ? BOOST_MULTIPLIER : 1);
   const targetSpeed = Math.min(maxSpeed, distance / MOVEMENT_RAMP_SECONDS);
   const accel = wantsBoost ? BOOST_ACCEL : NORMAL_ACCEL;
@@ -600,6 +670,9 @@ function updateLocalDragon(dt) {
   }
 
   dragon.water = Math.min(dragon.maxWater, dragon.water + WATER_REGEN_PER_SECOND * dt);
+  if (!wantsBoost) {
+    dragon.boostActiveUntil = 0;
+  }
   dragon.boosting = wantsBoost && distance > 0.001;
   dragon.boostVisual = approach(dragon.boostVisual, dragon.boosting ? 1 : 0, 10, dt);
   syncDragonStatusBars(dragon);
@@ -730,6 +803,25 @@ function drawZone(zone, innerColor, outerColor, label) {
   ctx.fillText(label, zone.x, zone.y);
 }
 
+function drawDragonName(dragon) {
+  if (!dragon || !dragon.name) {
+    return;
+  }
+
+  const scale = Math.max(1, dragon.radius / 25);
+  const y = dragon.y - dragon.radius - 24 * scale;
+
+  ctx.save();
+  ctx.font = `${Math.round(12 * scale)}px Segoe UI`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = "rgba(241, 255, 251, 0.9)";
+  ctx.shadowColor = "rgba(0, 0, 0, 0.45)";
+  ctx.shadowBlur = 10;
+  ctx.fillText(dragon.name, dragon.x, y);
+  ctx.restore();
+}
+
 function drawDragonBar(dragon, color, alpha, ratio, heightScale, yOffsetScale) {
   const scale = Math.max(1, dragon.radius / 25);
   const width = 20 * scale;
@@ -751,6 +843,8 @@ function drawDragonBars(dragon) {
   if (!dragon) {
     return;
   }
+
+  drawDragonName(dragon);
 
   if (dragon.hpBarA > 0.001) {
     drawDragonBar(dragon, "#16D729", dragon.hpBarA, dragon.hpPer, 5, 10);
@@ -967,6 +1061,22 @@ function sendInvitePacket() {
   setStatus(state.network.incomingInvite ? "Incoming 1v1 request." : "1v1 request sent.");
 }
 
+function sendPlayerName() {
+  if (!socketIsOpen()) {
+    return;
+  }
+
+  try {
+    state.network.socket.send(JSON.stringify({
+      type: "set_name",
+      name: state.profile.name
+    }));
+  } catch (_error) {
+    // Ignore transient send failures. A fresh snapshot will resync after
+    // reconnect if the socket fully drops.
+  }
+}
+
 function sendPing() {
   if (!socketIsOpen()) {
     return;
@@ -984,10 +1094,7 @@ function sendPing() {
 }
 
 function releaseAllActions() {
-  if (state.input.boost) {
-    state.input.boost = false;
-    sendBooleanPacket(PACKET_BOOST, false);
-  }
+  state.input.boost = false;
 
   if (state.input.secondary) {
     state.input.secondary = false;
@@ -996,12 +1103,21 @@ function releaseAllActions() {
 }
 
 function setBoost(active) {
-  if (state.input.boost === active) {
+  if (!active) {
     return;
   }
 
-  state.input.boost = active;
-  sendBooleanPacket(PACKET_BOOST, active);
+  const dragon = state.player;
+  const now = performance.now();
+  if (!canTriggerBoost(dragon, now)) {
+    return;
+  }
+
+  state.input.boost = true;
+  if (dragon) {
+    activateBoostBurst(dragon, now);
+  }
+  sendBooleanPacket(PACKET_BOOST, true);
 }
 
 function setSecondary(active) {
@@ -1056,6 +1172,7 @@ function connectToServer(url, isReconnect = false) {
       setConnection("Connected");
       showConnecting(false);
       sendResizePacket();
+      sendPlayerName();
       sendPing();
       syncInviteButton();
       setStatus("Connected. Practice mode live.");
@@ -1188,6 +1305,7 @@ function startPractice() {
     return;
   }
 
+  applyPlayerName(nameInput ? nameInput.value : state.profile.name);
   const url = getConfiguredServerUrl();
   connectToServer(url);
   spawnDragon();
@@ -1307,12 +1425,19 @@ startButton.addEventListener("pointerup", (event) => {
   event.preventDefault();
   startPractice();
 });
+if (nameInput) {
+  nameInput.addEventListener("change", () => {
+    applyPlayerName(nameInput.value);
+    sendPlayerName();
+  });
+}
 resetButton.addEventListener("click", resetArena);
 inviteButton.addEventListener("click", sendInvitePacket);
 
 setInterval(sendPointerPacket, 10);
 setInterval(sendPing, PING_INTERVAL_MS);
 
+hydratePlayerName();
 hydrateConnectionState();
 resizeCanvas();
 syncHud();
