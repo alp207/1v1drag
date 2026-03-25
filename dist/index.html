@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#102127">
+    <title>Dragon Practice 1v1</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <canvas id="arenaCanvas" aria-label="Dragon practice arena"></canvas>
+
+    <div id="connecting" class="connecting hidden">Connecting...</div>
+
+    <header class="hud">
+      <div class="hud-stack">
+        <div class="hud-card">
+          <span class="hud-label">Mode</span>
+          <strong>Dragon Practice 1v1</strong>
+        </div>
+
+        <div class="hud-card">
+          <span class="hud-label">Connection</span>
+          <strong id="connectionText">Practice only</strong>
+        </div>
+
+        <div class="hud-card hud-card-wide">
+          <span class="hud-label">Status</span>
+          <strong id="statusMessage">Press Play to spawn your dragon.</strong>
+        </div>
+      </div>
+
+      <div class="hud-actions">
+        <button id="inviteButton" class="hud-button" type="button">Q: Send 1v1</button>
+        <button id="resetButton" class="hud-button hud-button-secondary" type="button">Reset Arena</button>
+      </div>
+    </header>
+
+    <section class="meters">
+      <div class="meter-card">
+        <div class="meter-meta">
+          <span class="meter-name">Health</span>
+          <span id="playerHealthText" class="meter-value">100 / 100</span>
+        </div>
+        <div class="meter-track">
+          <div id="playerHealthFill" class="meter-fill meter-fill-health"></div>
+        </div>
+      </div>
+
+      <div class="meter-card">
+        <div class="meter-meta">
+          <span class="meter-name">Water</span>
+          <span id="waterText" class="meter-value">100 / 100</span>
+        </div>
+        <div class="meter-track">
+          <div id="waterFill" class="meter-fill meter-fill-water"></div>
+        </div>
+      </div>
+
+      <div class="meter-card">
+        <div class="meter-meta">
+          <span class="meter-name">Opponent</span>
+          <span id="opponentHealthText" class="meter-value">Waiting</span>
+        </div>
+        <div class="meter-track">
+          <div id="opponentHealthFill" class="meter-fill meter-fill-opponent"></div>
+        </div>
+      </div>
+
+      <div class="score-card">
+        <span id="roundText">Wins 0 - 0</span>
+        <span id="bitesText">Bites 0 - 0</span>
+      </div>
+    </section>
+
+    <footer class="controls-strip">
+      <span>Move with the mouse</span>
+      <span>Left click or Space to boost</span>
+      <span>Q to send 1v1</span>
+    </footer>
+
+    <section id="startMenu" class="start-menu">
+      <div class="start-card">
+        <p class="start-kicker">Dragon-Only Build</p>
+        <h1>Practice Mode</h1>
+        <p class="start-copy">
+          Play spawns dragon only. The mouse target, left-click boost, space boost,
+          arena camera, and practice arena flow follow the same client-side feel
+          from <code>client.js</code>.
+        </p>
+
+        <div class="start-actions">
+          <button id="startButton" class="start-button" type="button">Play</button>
+        </div>
+      </div>
+    </section>
+
+    <script src="config.js"></script>
+    <script src="game.js"></script>
+  </body>
+</html>
