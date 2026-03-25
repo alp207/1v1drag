@@ -489,6 +489,8 @@ function serializeDragon(dragon) {
     water: round1(dragon.water),
     maxWater: dragon.maxWater,
     baseSpeed: dragon.baseSpeed,
+    biteCooldown: round1(dragon.biteCooldown || 0),
+    biteCooldownMax: BITE_COOLDOWN,
     boosting: dragon.boosting,
     boostVisual: round1(dragon.boostVisual),
     healVisual: round1(dragon.healVisual)
@@ -503,6 +505,7 @@ function sendSnapshot(client) {
   const roomOpponent = opponentFor(client);
   const opponent = roomOpponent || previewOpponentFor(client);
   const payload = {
+    type: "snapshot",
     status: client.status,
     phase: roomOpponent ? "arena" : "practice",
     incomingInvite: client.incomingInviteFrom != null,
@@ -574,6 +577,25 @@ function handlePacket(client, message) {
   }
 }
 
+function handleTextMessage(client, message) {
+  let payload;
+
+  try {
+    payload = JSON.parse(message.toString());
+  } catch (_error) {
+    return;
+  }
+
+  if (!payload || payload.type !== "ping" || !socketIsOpen(client)) {
+    return;
+  }
+
+  client.ws.send(JSON.stringify({
+    type: "pong",
+    sentAt: Number.isFinite(payload.sentAt) ? payload.sentAt : Date.now()
+  }));
+}
+
 const server = http.createServer((request, response) => {
   if (request.url === "/health") {
     response.writeHead(200, { "content-type": "application/json" });
@@ -618,11 +640,12 @@ wss.on("connection", (ws) => {
   sendSnapshot(client);
 
   ws.on("message", (message, isBinary) => {
-    if (!isBinary) {
+    if (isBinary) {
+      handlePacket(client, message);
       return;
     }
 
-    handlePacket(client, message);
+    handleTextMessage(client, message);
   });
 
   ws.on("close", () => {

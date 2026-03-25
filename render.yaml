@@ -3,6 +3,7 @@ services:
     name: dragon-duel-server
     runtime: node
     plan: free
+    region: frankfurt
     rootDir: server
     buildCommand: npm install
     startCommand: npm start

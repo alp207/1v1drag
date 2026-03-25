@@ -159,6 +159,14 @@ body {
   font-weight: 700;
 }
 
+.meter-ping {
+  margin-top: 6px;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
 .meter-track {
   height: 10px;
   overflow: hidden;

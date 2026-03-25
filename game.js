@@ -17,6 +17,7 @@ const opponentHealthFill = document.getElementById("opponentHealthFill");
 const opponentHealthText = document.getElementById("opponentHealthText");
 const roundText = document.getElementById("roundText");
 const bitesText = document.getElementById("bitesText");
+const pingText = document.getElementById("pingText");
 
 const dragonSprite = new Image();
 dragonSprite.src = "dragon.png";
@@ -40,6 +41,10 @@ const WATER_BOOST_DRAIN_PER_SECOND = 16;
 const BITE_RANGE = 122;
 const BITE_DAMAGE = 10;
 const BITE_COOLDOWN_MS = 420;
+const BITE_COOLDOWN_SECONDS = BITE_COOLDOWN_MS / 1000;
+const HEALTH_BAR_TIMEOUT_MS = 1800;
+const BITE_BAR_TIMEOUT_MS = 500;
+const PING_INTERVAL_MS = 2000;
 const SPRITE_ROTATION = -Math.PI / 2;
 const PACKET_POINTER = 0x05;
 const PACKET_RESIZE = 0x11;
@@ -85,9 +90,11 @@ const state = {
     desiredUrl: "",
     connected: false,
     remoteAuthority: false,
+    phase: "practice",
     reconnectTimer: null,
     incomingInvite: false,
     outgoingInvite: false,
+    pingMs: null,
     lastTargetX: NaN,
     lastTargetY: NaN
   }
@@ -129,6 +136,12 @@ function createDragon(seed = {}) {
   const y = Number.isFinite(seed.y) ? seed.y : ARENA.y;
   const angle = Number.isFinite(seed.angle) ? seed.angle : 0;
   const radius = Number.isFinite(seed.radius) ? seed.radius : PLAYER_RADIUS;
+  const health = Number.isFinite(seed.health) ? seed.health : 100;
+  const maxHealth = Number.isFinite(seed.maxHealth) ? seed.maxHealth : 100;
+  const water = Number.isFinite(seed.water) ? seed.water : 100;
+  const maxWater = Number.isFinite(seed.maxWater) ? seed.maxWater : 100;
+  const biteCooldown = Number.isFinite(seed.biteCooldown) ? seed.biteCooldown : 0;
+  const biteCooldownMax = Number.isFinite(seed.biteCooldownMax) ? seed.biteCooldownMax : BITE_COOLDOWN_SECONDS;
 
   return {
     name: seed.name || "Dragon",
@@ -138,14 +151,26 @@ function createDragon(seed = {}) {
     vy: Number.isFinite(seed.vy) ? seed.vy : 0,
     angle,
     radius,
-    health: Number.isFinite(seed.health) ? seed.health : 100,
-    maxHealth: Number.isFinite(seed.maxHealth) ? seed.maxHealth : 100,
-    water: Number.isFinite(seed.water) ? seed.water : 100,
-    maxWater: Number.isFinite(seed.maxWater) ? seed.maxWater : 100,
+    health,
+    maxHealth,
+    water,
+    maxWater,
     baseSpeed: Number.isFinite(seed.baseSpeed) ? seed.baseSpeed : PLAYER_SPEED,
     boosting: false,
     boostVisual: Number.isFinite(seed.boostVisual) ? seed.boostVisual : 0,
     healVisual: Number.isFinite(seed.healVisual) ? seed.healVisual : 0,
+    hurtVisual: 0,
+    biteCooldown,
+    biteCooldownMax,
+    hpBarA: 0,
+    hpPer: clamp(maxHealth > 0 ? health / maxHealth : 1, 0, 1),
+    hpPerTarget: clamp(maxHealth > 0 ? health / maxHealth : 1, 0, 1),
+    hpBarTimeoutAt: 0,
+    biteBarA: 0,
+    bitePer: clamp(biteCooldownMax > 0 ? biteCooldown / biteCooldownMax : 0, 0, 1),
+    bitePerTarget: clamp(biteCooldownMax > 0 ? biteCooldown / biteCooldownMax : 0, 0, 1),
+    biteBarTimeoutAt: 0,
+    forceHealthBar: false,
     ox: x,
     oy: y,
     nx: x,
@@ -157,23 +182,89 @@ function createDragon(seed = {}) {
   };
 }
 
+function healthRatio(dragon) {
+  if (!dragon || dragon.maxHealth <= 0) {
+    return 1;
+  }
+
+  return clamp(dragon.health / dragon.maxHealth, 0, 1);
+}
+
+function biteCooldownRatio(dragon) {
+  if (!dragon || dragon.biteCooldownMax <= 0) {
+    return 0;
+  }
+
+  return clamp(dragon.biteCooldown / dragon.biteCooldownMax, 0, 1);
+}
+
+function syncDragonStatusBars(dragon, options = {}) {
+  if (!dragon) {
+    return;
+  }
+
+  const now = performance.now();
+  const healthChanged = options.healthChanged === true;
+  const biteChanged = options.biteChanged === true;
+  const healed = options.healed === true;
+
+  dragon.hpPerTarget = healthRatio(dragon);
+  dragon.bitePerTarget = biteCooldownRatio(dragon);
+
+  if (healthChanged || healed) {
+    dragon.hpBarTimeoutAt = now + HEALTH_BAR_TIMEOUT_MS;
+  }
+
+  if (biteChanged || dragon.bitePerTarget > 0.001) {
+    dragon.biteBarTimeoutAt = now + BITE_BAR_TIMEOUT_MS;
+  }
+
+  if (healed) {
+    dragon.healVisual = 1;
+  }
+
+  if (healthChanged) {
+    dragon.hurtVisual = 1;
+  }
+}
+
+function updateDragonStatusVisuals(dragon, dt) {
+  if (!dragon) {
+    return;
+  }
+
+  if (dragon.biteCooldown > 0) {
+    dragon.biteCooldown = Math.max(0, dragon.biteCooldown - dt);
+  }
+
+  syncDragonStatusBars(dragon);
+
+  const now = performance.now();
+  const showHealthBar = dragon.forceHealthBar || now < dragon.hpBarTimeoutAt;
+  const showBiteBar = dragon.bitePerTarget > 0.001 || now < dragon.biteBarTimeoutAt;
+
+  dragon.hpBarA += ((showHealthBar ? 1 : 0) - dragon.hpBarA) * 0.04;
+  dragon.hpPer += (dragon.hpPerTarget - dragon.hpPer) * 0.1;
+  dragon.biteBarA += ((showBiteBar ? 1 : 0) - dragon.biteBarA) * 0.04;
+  dragon.bitePer += (dragon.bitePerTarget - dragon.bitePer) * 0.1;
+  dragon.healVisual = approach(dragon.healVisual, 0, 9, dt);
+  dragon.hurtVisual = approach(dragon.hurtVisual, 0, 8, dt);
+}
+
 function syncRemoteDragon(current, snapshot, defaults = {}) {
   const mergedSnapshot = { ...defaults, ...snapshot };
-  const now = performance.now();
   const dragon = current || createDragon(mergedSnapshot);
-  const nextX = Number.isFinite(mergedSnapshot.x) ? mergedSnapshot.x : dragon.x;
-  const nextY = Number.isFinite(mergedSnapshot.y) ? mergedSnapshot.y : dragon.y;
+  const nextX = Number.isFinite(mergedSnapshot.x) ? mergedSnapshot.x : dragon.nx;
+  const nextY = Number.isFinite(mergedSnapshot.y) ? mergedSnapshot.y : dragon.ny;
   const nextAngle = Number.isFinite(mergedSnapshot.angle) ? mergedSnapshot.angle : dragon.angle;
   const nextRadius = Number.isFinite(mergedSnapshot.radius) ? mergedSnapshot.radius : dragon.radius;
+  const previousHealth = dragon.health;
+  const previousBiteCooldown = dragon.biteCooldown;
 
-  dragon.ox = dragon.x;
-  dragon.oy = dragon.y;
-  dragon.nx = nextX;
-  dragon.ny = nextY;
+  setMovedToPos(dragon, nextX, nextY);
   dragon.oAngle = dragon.angle;
   dragon.nAngle = nextAngle;
   dragon.nRadius = nextRadius;
-  dragon.updateTime = now;
 
   dragon.vx = Number.isFinite(mergedSnapshot.vx) ? mergedSnapshot.vx : dragon.vx;
   dragon.vy = Number.isFinite(mergedSnapshot.vy) ? mergedSnapshot.vy : dragon.vy;
@@ -182,14 +273,31 @@ function syncRemoteDragon(current, snapshot, defaults = {}) {
   dragon.water = Number.isFinite(mergedSnapshot.water) ? mergedSnapshot.water : dragon.water;
   dragon.maxWater = Number.isFinite(mergedSnapshot.maxWater) ? mergedSnapshot.maxWater : dragon.maxWater;
   dragon.baseSpeed = Number.isFinite(mergedSnapshot.baseSpeed) ? mergedSnapshot.baseSpeed : dragon.baseSpeed;
+  dragon.biteCooldown = Number.isFinite(mergedSnapshot.biteCooldown) ? mergedSnapshot.biteCooldown : dragon.biteCooldown;
+  dragon.biteCooldownMax = Number.isFinite(mergedSnapshot.biteCooldownMax)
+    ? mergedSnapshot.biteCooldownMax
+    : dragon.biteCooldownMax;
   dragon.boosting = Boolean(mergedSnapshot.boosting);
   dragon.boostVisual = Number.isFinite(mergedSnapshot.boostVisual) ? mergedSnapshot.boostVisual : dragon.boostVisual;
   dragon.healVisual = Number.isFinite(mergedSnapshot.healVisual) ? mergedSnapshot.healVisual : dragon.healVisual;
+  syncDragonStatusBars(dragon, {
+    healthChanged: dragon.health < previousHealth - 0.05,
+    healed: dragon.health > previousHealth + 0.05,
+    biteChanged: Math.abs(dragon.biteCooldown - previousBiteCooldown) > 0.01
+  });
 
   return dragon;
 }
 
-function updateRemoteDragon(dragon, dt) {
+function setMovedToPos(dragon, x, y) {
+  dragon.updateTime = performance.now();
+  dragon.ox = dragon.x;
+  dragon.oy = dragon.y;
+  dragon.nx = x;
+  dragon.ny = y;
+}
+
+function moveUpdate(dragon, dt) {
   if (!dragon) {
     return;
   }
@@ -204,6 +312,8 @@ function updateRemoteDragon(dragon, dt) {
   dragon.angle += shortestAngleDelta(dragon.angle, dragon.nAngle) * Math.min(0.1 * dt * 60, 1);
   dragon.vx = (dragon.x - previousX) / Math.max(dt, 0.0001);
   dragon.vy = (dragon.y - previousY) / Math.max(dt, 0.0001);
+
+  return Math.min(1, progress);
 }
 
 function setStatus(message) {
@@ -219,7 +329,7 @@ function showConnecting(show) {
 }
 
 function syncInviteButton() {
-  const inArena = state.network.remoteAuthority && state.opponent;
+  const inArena = state.network.remoteAuthority && state.network.phase === "arena";
   const incomingInvite = state.network.incomingInvite;
   const outgoingInvite = state.network.outgoingInvite;
   const offline = !state.network.connected;
@@ -286,24 +396,50 @@ function syncHud() {
   const waterRatio = player ? clamp(player.water / player.maxWater, 0, 1) : 1;
   const opponentRatio = opponent ? clamp(opponent.health / opponent.maxHealth, 0, 1) : 0;
 
-  playerHealthFill.style.transform = `scaleX(${healthRatio})`;
-  waterFill.style.transform = `scaleX(${waterRatio})`;
-  opponentHealthFill.style.transform = `scaleX(${opponentRatio})`;
+  if (playerHealthFill) {
+    playerHealthFill.style.transform = `scaleX(${healthRatio})`;
+  }
+  if (waterFill) {
+    waterFill.style.transform = `scaleX(${waterRatio})`;
+  }
+  if (opponentHealthFill) {
+    opponentHealthFill.style.transform = `scaleX(${opponentRatio})`;
+  }
 
-  playerHealthText.textContent = player
-    ? `${Math.round(player.health)} / ${player.maxHealth}`
-    : "100 / 100";
+  if (playerHealthText) {
+    playerHealthText.textContent = player
+      ? `${Math.round(player.health)} / ${player.maxHealth}`
+      : "100 / 100";
+  }
 
-  waterText.textContent = player
-    ? `${Math.round(player.water)} / ${player.maxWater}`
-    : "100 / 100";
+  if (waterText) {
+    waterText.textContent = player
+      ? `${Math.round(player.water)} / ${player.maxWater}`
+      : "100 / 100";
+  }
 
-  opponentHealthText.textContent = opponent
-    ? `${Math.round(opponent.health)} / ${opponent.maxHealth}`
-    : "Waiting";
+  if (pingText) {
+    pingText.textContent = state.network.connected
+      ? Number.isFinite(state.network.pingMs)
+        ? `Ping ${Math.round(state.network.pingMs)} ms`
+        : "Ping ..."
+      : state.network.desiredUrl
+        ? "Ping --"
+        : "Ping -- ms";
+  }
 
-  roundText.textContent = `Wins ${state.round.wins} - ${state.round.losses}`;
-  bitesText.textContent = `Bites ${state.round.bites} - ${state.round.opponentBites}`;
+  if (opponentHealthText) {
+    opponentHealthText.textContent = opponent
+      ? `${Math.round(opponent.health)} / ${opponent.maxHealth}`
+      : "Waiting";
+  }
+
+  if (roundText) {
+    roundText.textContent = `Wins ${state.round.wins} - ${state.round.losses}`;
+  }
+  if (bitesText) {
+    bitesText.textContent = `Bites ${state.round.bites} - ${state.round.opponentBites}`;
+  }
 }
 
 function resizeCanvas() {
@@ -378,8 +514,10 @@ function clampToArena(dragon) {
 
 function spawnDragon() {
   state.player = createDragon();
+  syncDragonStatusBars(state.player, { healed: true });
   state.opponent = null;
   state.phase = "running";
+  state.network.phase = "practice";
   state.pointer.hasPointer = false;
   state.input.boost = false;
   state.input.secondary = false;
@@ -464,7 +602,7 @@ function updateLocalDragon(dt) {
   dragon.water = Math.min(dragon.maxWater, dragon.water + WATER_REGEN_PER_SECOND * dt);
   dragon.boosting = wantsBoost && distance > 0.001;
   dragon.boostVisual = approach(dragon.boostVisual, dragon.boosting ? 1 : 0, 10, dt);
-  dragon.healVisual = approach(dragon.healVisual, 0, 9, dt);
+  syncDragonStatusBars(dragon);
 
   clampToArena(dragon);
 }
@@ -592,6 +730,37 @@ function drawZone(zone, innerColor, outerColor, label) {
   ctx.fillText(label, zone.x, zone.y);
 }
 
+function drawDragonBar(dragon, color, alpha, ratio, heightScale, yOffsetScale) {
+  const scale = Math.max(1, dragon.radius / 25);
+  const width = 20 * scale;
+  const height = heightScale * scale;
+  const y = -dragon.radius - yOffsetScale * scale;
+
+  ctx.save();
+  ctx.translate(dragon.x, dragon.y);
+  ctx.globalAlpha = 0.3;
+  ctx.fillStyle = "rgba(0, 0, 0, 0.35)";
+  ctx.fillRect(-width / 2, y - height / 2, width, height);
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = color;
+  ctx.fillRect(-width / 2, y - height / 2, width * clamp(ratio, 0, 1), height);
+  ctx.restore();
+}
+
+function drawDragonBars(dragon) {
+  if (!dragon) {
+    return;
+  }
+
+  if (dragon.hpBarA > 0.001) {
+    drawDragonBar(dragon, "#16D729", dragon.hpBarA, dragon.hpPer, 5, 10);
+  }
+
+  if (dragon.biteBarA > 0.001 && dragon.bitePer > 0.001) {
+    drawDragonBar(dragon, "#F3C553", dragon.biteBarA, dragon.bitePer, 2, 6.5);
+  }
+}
+
 function drawDragon(dragon, glowColor, bodyAlpha = 1) {
   if (!dragon) {
     return;
@@ -630,6 +799,14 @@ function drawDragon(dragon, glowColor, bodyAlpha = 1) {
     ctx.fill();
   }
 
+  if (dragon.hurtVisual > 0.02) {
+    ctx.globalAlpha = dragon.hurtVisual * 0.3;
+    ctx.fillStyle = "rgba(255, 0, 0, 0.3)";
+    ctx.beginPath();
+    ctx.arc(0, 0, Math.max(0, dragon.radius), 0, Math.PI * 2);
+    ctx.fill();
+  }
+
   if (dragon.healVisual > 0.02) {
     ctx.globalAlpha = dragon.healVisual * 0.45;
     ctx.strokeStyle = "#a6ffe3";
@@ -640,6 +817,7 @@ function drawDragon(dragon, glowColor, bodyAlpha = 1) {
   }
 
   ctx.restore();
+  drawDragonBars(dragon);
 }
 
 function drawPointer() {
@@ -686,8 +864,18 @@ function update(dt) {
   }
 
   if (state.network.connected && state.network.remoteAuthority) {
-    updateRemoteDragon(state.player, dt);
-    updateRemoteDragon(state.opponent, dt);
+    moveUpdate(state.player, dt);
+    moveUpdate(state.opponent, dt);
+  }
+
+  const showArenaHealthBars = state.network.phase === "arena" && state.opponent != null;
+  if (state.player) {
+    state.player.forceHealthBar = showArenaHealthBars;
+    updateDragonStatusVisuals(state.player, dt);
+  }
+  if (state.opponent) {
+    state.opponent.forceHealthBar = showArenaHealthBars;
+    updateDragonStatusVisuals(state.opponent, dt);
   }
 
   updateCamera(dt);
@@ -779,6 +967,22 @@ function sendInvitePacket() {
   setStatus(state.network.incomingInvite ? "Incoming 1v1 request." : "1v1 request sent.");
 }
 
+function sendPing() {
+  if (!socketIsOpen()) {
+    return;
+  }
+
+  try {
+    state.network.socket.send(JSON.stringify({
+      type: "ping",
+      sentAt: Date.now()
+    }));
+  } catch (_error) {
+    // Ignore transient ping send errors. The reconnect flow will handle the
+    // socket if it fully drops.
+  }
+}
+
 function releaseAllActions() {
   if (state.input.boost) {
     state.input.boost = false;
@@ -821,8 +1025,10 @@ function connectToServer(url, isReconnect = false) {
 
   state.network.connected = false;
   state.network.remoteAuthority = false;
+  state.network.phase = "practice";
   state.network.incomingInvite = false;
   state.network.outgoingInvite = false;
+  state.network.pingMs = null;
   state.network.url = trimmedUrl;
 
   if (!trimmedUrl) {
@@ -850,6 +1056,7 @@ function connectToServer(url, isReconnect = false) {
       setConnection("Connected");
       showConnecting(false);
       sendResizePacket();
+      sendPing();
       syncInviteButton();
       setStatus("Connected. Practice mode live.");
     });
@@ -862,8 +1069,10 @@ function connectToServer(url, isReconnect = false) {
       state.network.socket = null;
       state.network.connected = false;
       state.network.remoteAuthority = false;
+      state.network.phase = "practice";
       state.network.incomingInvite = false;
       state.network.outgoingInvite = false;
+      state.network.pingMs = null;
       setConnection(trimmedUrl ? "Disconnected" : "Practice only");
       showConnecting(false);
       syncInviteButton();
@@ -880,8 +1089,10 @@ function connectToServer(url, isReconnect = false) {
 
       state.network.connected = false;
       state.network.remoteAuthority = false;
+      state.network.phase = "practice";
       state.network.incomingInvite = false;
       state.network.outgoingInvite = false;
+      state.network.pingMs = null;
       setConnection("Connection error");
       showConnecting(false);
       syncInviteButton();
@@ -905,8 +1116,10 @@ function connectToServer(url, isReconnect = false) {
   } catch (_error) {
     state.network.connected = false;
     state.network.remoteAuthority = false;
+    state.network.phase = "practice";
     state.network.incomingInvite = false;
     state.network.outgoingInvite = false;
+    state.network.pingMs = null;
     setConnection("Connection error");
     showConnecting(false);
     syncInviteButton();
@@ -920,8 +1133,19 @@ function applyServerMessage(message) {
     return;
   }
 
+  if (message.type === "pong") {
+    if (Number.isFinite(message.sentAt)) {
+      state.network.pingMs = Math.max(0, Date.now() - message.sentAt);
+    }
+    return;
+  }
+
   if (typeof message.status === "string") {
     setStatus(message.status);
+  }
+
+  if (typeof message.phase === "string") {
+    state.network.phase = message.phase;
   }
 
   state.network.incomingInvite = message.incomingInvite === true;
@@ -1087,6 +1311,7 @@ resetButton.addEventListener("click", resetArena);
 inviteButton.addEventListener("click", sendInvitePacket);
 
 setInterval(sendPointerPacket, 10);
+setInterval(sendPing, PING_INTERVAL_MS);
 
 hydrateConnectionState();
 resizeCanvas();
