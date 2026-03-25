@@ -7,11 +7,11 @@ const TICK_RATE = 60;
 const SNAPSHOT_EVERY_TICKS = 3;
 const ROUND_RESET_MS = 1800;
 
-const WORLD_WIDTH = 4600;
-const WORLD_HEIGHT = 3200;
-const ARENA = { x: WORLD_WIDTH / 2, y: WORLD_HEIGHT / 2, radius: 1110 };
-const WATER_ZONE = { x: ARENA.x - 250, y: ARENA.y + 250, radius: 175 };
-const HEAL_ZONE = { x: ARENA.x + 300, y: ARENA.y - 230, radius: 145 };
+const WORLD_WIDTH = 7200;
+const WORLD_HEIGHT = 5200;
+const ARENA = { x: WORLD_WIDTH / 2, y: WORLD_HEIGHT / 2, radius: 1550 };
+const WATER_ZONE = { x: ARENA.x - 360, y: ARENA.y + 340, radius: 210 };
+const HEAL_ZONE = { x: ARENA.x + 390, y: ARENA.y - 300, radius: 180 };
 const PLAYER_RADIUS = 46;
 const PLAYER_SPEED = 270;
 const BOOST_MULTIPLIER = 1.82;
@@ -201,6 +201,12 @@ function queueClient(client, status = "Waiting for another dragon...") {
     return;
   }
 
+  if (client.queued) {
+    client.status = "Searching for a dragon duel...";
+    sendSnapshot(client);
+    return;
+  }
+
   if (!client.queued) {
     waitingQueue.push(client);
     client.queued = true;
@@ -373,7 +379,9 @@ function updateSoloClient(client, dt) {
   }
 
   updateDragon(client, dt);
-  client.status = client.queued ? "Waiting for another dragon..." : "Practice only.";
+  client.status = client.queued
+    ? "Searching for a dragon duel..."
+    : "Practice mode live. Press Q or Invite for 1v1.";
 }
 
 function serializeDragon(dragon) {
@@ -404,6 +412,7 @@ function sendSnapshot(client) {
   const payload = {
     status: client.status,
     phase: client.roomId ? "arena" : "practice",
+    queued: client.queued,
     player: serializeDragon(client.dragon),
     opponent: opponent && opponent.dragon ? serializeDragon(opponent.dragon) : null,
     round: {
@@ -430,9 +439,9 @@ function cleanupClient(client) {
     rooms.delete(room.id);
     if (opponent) {
       opponent.roomId = null;
-      opponent.status = "Opponent left. Waiting for another dragon...";
+      opponent.status = "Opponent left. Press Q to queue again.";
       spawnPracticeDragon(opponent);
-      queueClient(opponent, opponent.status);
+      sendSnapshot(opponent);
     }
   }
 
@@ -496,7 +505,7 @@ wss.on("connection", (ws) => {
     ws,
     roomId: null,
     queued: false,
-    status: "Waiting for another dragon...",
+    status: "Practice mode live. Press Q or Invite for 1v1.",
     dragon: null,
     targetX: ARENA.x,
     targetY: ARENA.y,
@@ -510,7 +519,7 @@ wss.on("connection", (ws) => {
 
   clients.set(client.id, client);
   spawnPracticeDragon(client);
-  queueClient(client, "Waiting for another dragon...");
+  sendSnapshot(client);
 
   ws.on("message", (message, isBinary) => {
     if (!isBinary) {
