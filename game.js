@@ -108,15 +108,30 @@ function normalize(x, y) {
   };
 }
 
+function shortestAngleDelta(from, to) {
+  let delta = (to - from) % (Math.PI * 2);
+  if (delta > Math.PI) {
+    delta -= Math.PI * 2;
+  } else if (delta < -Math.PI) {
+    delta += Math.PI * 2;
+  }
+  return delta;
+}
+
 function createDragon(seed = {}) {
+  const x = Number.isFinite(seed.x) ? seed.x : ARENA.x - ARENA.radius * 0.42;
+  const y = Number.isFinite(seed.y) ? seed.y : ARENA.y;
+  const angle = Number.isFinite(seed.angle) ? seed.angle : 0;
+  const radius = Number.isFinite(seed.radius) ? seed.radius : PLAYER_RADIUS;
+
   return {
     name: seed.name || "Dragon",
-    x: Number.isFinite(seed.x) ? seed.x : ARENA.x - ARENA.radius * 0.42,
-    y: Number.isFinite(seed.y) ? seed.y : ARENA.y,
+    x,
+    y,
     vx: Number.isFinite(seed.vx) ? seed.vx : 0,
     vy: Number.isFinite(seed.vy) ? seed.vy : 0,
-    angle: Number.isFinite(seed.angle) ? seed.angle : 0,
-    radius: Number.isFinite(seed.radius) ? seed.radius : PLAYER_RADIUS,
+    angle,
+    radius,
     health: Number.isFinite(seed.health) ? seed.health : 100,
     maxHealth: Number.isFinite(seed.maxHealth) ? seed.maxHealth : 100,
     water: Number.isFinite(seed.water) ? seed.water : 100,
@@ -124,8 +139,65 @@ function createDragon(seed = {}) {
     baseSpeed: Number.isFinite(seed.baseSpeed) ? seed.baseSpeed : PLAYER_SPEED,
     boosting: false,
     boostVisual: Number.isFinite(seed.boostVisual) ? seed.boostVisual : 0,
-    healVisual: Number.isFinite(seed.healVisual) ? seed.healVisual : 0
+    healVisual: Number.isFinite(seed.healVisual) ? seed.healVisual : 0,
+    ox: x,
+    oy: y,
+    nx: x,
+    ny: y,
+    oAngle: angle,
+    nAngle: angle,
+    nRadius: radius,
+    updateTime: performance.now()
   };
+}
+
+function syncRemoteDragon(current, snapshot, defaults = {}) {
+  const mergedSnapshot = { ...defaults, ...snapshot };
+  const now = performance.now();
+  const dragon = current || createDragon(mergedSnapshot);
+  const nextX = Number.isFinite(mergedSnapshot.x) ? mergedSnapshot.x : dragon.x;
+  const nextY = Number.isFinite(mergedSnapshot.y) ? mergedSnapshot.y : dragon.y;
+  const nextAngle = Number.isFinite(mergedSnapshot.angle) ? mergedSnapshot.angle : dragon.angle;
+  const nextRadius = Number.isFinite(mergedSnapshot.radius) ? mergedSnapshot.radius : dragon.radius;
+
+  dragon.ox = dragon.x;
+  dragon.oy = dragon.y;
+  dragon.nx = nextX;
+  dragon.ny = nextY;
+  dragon.oAngle = dragon.angle;
+  dragon.nAngle = nextAngle;
+  dragon.nRadius = nextRadius;
+  dragon.updateTime = now;
+
+  dragon.vx = Number.isFinite(mergedSnapshot.vx) ? mergedSnapshot.vx : dragon.vx;
+  dragon.vy = Number.isFinite(mergedSnapshot.vy) ? mergedSnapshot.vy : dragon.vy;
+  dragon.health = Number.isFinite(mergedSnapshot.health) ? mergedSnapshot.health : dragon.health;
+  dragon.maxHealth = Number.isFinite(mergedSnapshot.maxHealth) ? mergedSnapshot.maxHealth : dragon.maxHealth;
+  dragon.water = Number.isFinite(mergedSnapshot.water) ? mergedSnapshot.water : dragon.water;
+  dragon.maxWater = Number.isFinite(mergedSnapshot.maxWater) ? mergedSnapshot.maxWater : dragon.maxWater;
+  dragon.baseSpeed = Number.isFinite(mergedSnapshot.baseSpeed) ? mergedSnapshot.baseSpeed : dragon.baseSpeed;
+  dragon.boosting = Boolean(mergedSnapshot.boosting);
+  dragon.boostVisual = Number.isFinite(mergedSnapshot.boostVisual) ? mergedSnapshot.boostVisual : dragon.boostVisual;
+  dragon.healVisual = Number.isFinite(mergedSnapshot.healVisual) ? mergedSnapshot.healVisual : dragon.healVisual;
+
+  return dragon;
+}
+
+function updateRemoteDragon(dragon, dt) {
+  if (!dragon) {
+    return;
+  }
+
+  const progress = clamp((performance.now() - dragon.updateTime) / 1000 / POSITION_LERP_SECONDS, 0, 1);
+  const previousX = dragon.x;
+  const previousY = dragon.y;
+
+  dragon.x = progress * (dragon.nx - dragon.ox) + dragon.ox;
+  dragon.y = progress * (dragon.ny - dragon.oy) + dragon.oy;
+  dragon.radius += (dragon.nRadius - dragon.radius) * 0.1;
+  dragon.angle += shortestAngleDelta(dragon.angle, dragon.nAngle) * Math.min(0.1 * dt * 60, 1);
+  dragon.vx = (dragon.x - previousX) / Math.max(dt, 0.0001);
+  dragon.vy = (dragon.y - previousY) / Math.max(dt, 0.0001);
 }
 
 function setStatus(message) {
@@ -600,6 +672,11 @@ function update(dt) {
     updateLocalDragon(dt);
   }
 
+  if (state.network.connected && state.network.remoteAuthority) {
+    updateRemoteDragon(state.player, dt);
+    updateRemoteDragon(state.opponent, dt);
+  }
+
   updateCamera(dt);
   syncHud();
 }
@@ -837,16 +914,14 @@ function applyServerMessage(message) {
 
   if (message.player && typeof message.player === "object") {
     state.network.remoteAuthority = true;
-    state.player = createDragon({ ...(state.player || {}), ...message.player });
+    state.player = syncRemoteDragon(state.player, message.player);
   }
 
   if (message.opponent && typeof message.opponent === "object") {
-    state.opponent = createDragon({
+    state.opponent = syncRemoteDragon(state.opponent, message.opponent, {
       x: ARENA.x + ARENA.radius * 0.42,
       y: ARENA.y,
-      angle: Math.PI,
-      ...(state.opponent || {}),
-      ...message.opponent
+      angle: Math.PI
     });
   } else if (message.opponent === null) {
     state.opponent = null;

@@ -222,10 +222,6 @@ body {
   box-shadow: var(--shadow);
 }
 
-.hidden {
-  display: none;
-}
-
 .start-menu {
   inset: 0;
   display: grid;
@@ -235,6 +231,11 @@ body {
     radial-gradient(circle at top, rgba(54, 152, 141, 0.2), transparent 38%),
     rgba(3, 10, 13, 0.72);
   backdrop-filter: blur(8px);
+}
+
+.hidden,
+.start-menu.hidden {
+  display: none;
 }
 
 .start-card {
