@@ -6,32 +6,31 @@ const PORT = Number(process.env.PORT || 10000);
 const TICK_RATE = 60;
 const SNAPSHOT_EVERY_TICKS = 3;
 const ROUND_RESET_MS = 1800;
+const INVITE_TIMEOUT_MS = 10000;
 
 const WORLD_WIDTH = 7200;
 const WORLD_HEIGHT = 5200;
 const ARENA = { x: WORLD_WIDTH / 2, y: WORLD_HEIGHT / 2, radius: 1550 };
-const WATER_ZONE = { x: ARENA.x - 360, y: ARENA.y + 340, radius: 210 };
-const HEAL_ZONE = { x: ARENA.x + 390, y: ARENA.y - 300, radius: 180 };
 const PLAYER_RADIUS = 46;
-const PLAYER_SPEED = 270;
-const BOOST_MULTIPLIER = 1.82;
-const POSITION_LERP_SECONDS = 0.175;
-const NORMAL_ACCEL = 16;
-const BOOST_ACCEL = 18;
-const NORMAL_DRAG = 8;
-const BOOST_DRAG = 6;
+const PLAYER_SPEED = 150;
+const BOOST_MULTIPLIER = 1.2;
+const MOVEMENT_RAMP_SECONDS = 0.42;
+const NORMAL_ACCEL = 10;
+const BOOST_ACCEL = 12;
+const NORMAL_DRAG = 10;
+const BOOST_DRAG = 8;
+const WATER_REGEN_PER_SECOND = 8;
+const WATER_BOOST_DRAIN_PER_SECOND = 16;
 const PACKET_POINTER = 0x05;
 const PACKET_RESIZE = 0x11;
 const PACKET_SECONDARY = 0x14;
 const PACKET_BOOST = 0x15;
 const PACKET_INVITE_1V1 = 0x34;
 const BITE_RANGE = 122;
-const BITE_DAMAGE = 23;
-const BITE_HEAL = 6;
+const BITE_DAMAGE = 10;
 const BITE_COOLDOWN = 0.42;
 
 const clients = new Map();
-const waitingQueue = [];
 const rooms = new Map();
 let tickCounter = 0;
 
@@ -89,12 +88,59 @@ function spawnPracticeDragon(client) {
     y: ARENA.y,
     angle: 0
   });
-  client.targetX = client.dragon.x + 160;
+  client.targetX = client.dragon.x + 120;
   client.targetY = client.dragon.y;
   client.boost = false;
   client.secondary = false;
   client.biteCooldown = 0;
   client.roundBites = 0;
+}
+
+function opponentFor(client) {
+  if (!client.roomId) {
+    return null;
+  }
+
+  const room = rooms.get(client.roomId);
+  if (!room) {
+    return null;
+  }
+
+  return room.players[0] === client ? room.players[1] : room.players[0];
+}
+
+function previewOpponentFor(client) {
+  const preferredId = client.incomingInviteFrom || client.outgoingInviteTo;
+  if (preferredId) {
+    const preferred = clients.get(preferredId);
+    if (preferred && preferred !== client && socketIsOpen(preferred) && !preferred.roomId) {
+      return preferred;
+    }
+  }
+
+  for (const candidate of clients.values()) {
+    if (
+      candidate === client ||
+      !socketIsOpen(candidate) ||
+      candidate.roomId ||
+      candidate.incomingInviteFrom ||
+      candidate.outgoingInviteTo
+    ) {
+      continue;
+    }
+
+    return candidate;
+  }
+
+  for (const candidate of clients.values()) {
+    if (candidate === client || !socketIsOpen(candidate) || candidate.roomId) {
+      continue;
+    }
+
+    return candidate;
+  }
+
+  return null;
 }
 
 function spawnRoom(room) {
@@ -112,85 +158,97 @@ function spawnRoom(room) {
   });
 
   for (const client of room.players) {
-    client.targetX = client.dragon.x + Math.cos(client.dragon.angle) * 160;
-    client.targetY = client.dragon.y + Math.sin(client.dragon.angle) * 160;
+    client.targetX = client.dragon.x + Math.cos(client.dragon.angle) * 120;
+    client.targetY = client.dragon.y + Math.sin(client.dragon.angle) * 120;
     client.boost = false;
     client.secondary = false;
     client.biteCooldown = 0;
     client.roundBites = 0;
+    client.outgoingInviteTo = null;
+    client.incomingInviteFrom = null;
+    client.inviteExpiresAt = 0;
   }
 }
 
-function removeFromQueue(client) {
-  client.queued = false;
-
-  for (let index = waitingQueue.length - 1; index >= 0; index -= 1) {
-    if (waitingQueue[index] === client) {
-      waitingQueue.splice(index, 1);
-    }
-  }
-}
-
-function opponentFor(client) {
-  if (!client.roomId) {
-    return null;
-  }
-
-  const room = rooms.get(client.roomId);
-  if (!room) {
-    return null;
-  }
-
-  return room.players[0] === client ? room.players[1] : room.players[0];
-}
-
-function pairWaitingClients() {
-  for (let index = waitingQueue.length - 1; index >= 0; index -= 1) {
-    const candidate = waitingQueue[index];
-    if (!socketIsOpen(candidate) || candidate.roomId) {
-      waitingQueue.splice(index, 1);
-      if (candidate) {
-        candidate.queued = false;
-      }
+function clearInvitePair(inviter, target, inviterStatus = null, targetStatus = null) {
+  if (inviter) {
+    inviter.outgoingInviteTo = null;
+    inviter.inviteExpiresAt = 0;
+    if (inviterStatus) {
+      inviter.status = inviterStatus;
     }
   }
 
-  while (waitingQueue.length >= 2) {
-    const first = waitingQueue.shift();
-    const second = waitingQueue.shift();
-
-    if (!socketIsOpen(first) || !socketIsOpen(second) || first.roomId || second.roomId) {
-      if (socketIsOpen(first) && !first.roomId) {
-        queueClient(first, "Waiting for another dragon...");
-      }
-      if (socketIsOpen(second) && !second.roomId) {
-        queueClient(second, "Waiting for another dragon...");
-      }
-      continue;
+  if (target) {
+    target.incomingInviteFrom = null;
+    target.inviteExpiresAt = 0;
+    if (targetStatus) {
+      target.status = targetStatus;
     }
+  }
 
-    first.queued = false;
-    second.queued = false;
+  if (inviter && socketIsOpen(inviter)) {
+    sendSnapshot(inviter);
+  }
 
-    const room = {
-      id: crypto.randomUUID(),
-      players: [first, second],
-      state: "running",
-      resetAt: 0
-    };
-
-    first.roomId = room.id;
-    second.roomId = room.id;
-    first.status = "1v1 started. Right click or W to bite.";
-    second.status = "1v1 started. Right click or W to bite.";
-    spawnRoom(room);
-    rooms.set(room.id, room);
-    sendSnapshot(first);
-    sendSnapshot(second);
+  if (target && socketIsOpen(target)) {
+    sendSnapshot(target);
   }
 }
 
-function queueClient(client, status = "Waiting for another dragon...") {
+function clearClientInvites(client, status = null) {
+  if (client.outgoingInviteTo) {
+    const target = clients.get(client.outgoingInviteTo);
+    clearInvitePair(
+      client,
+      target,
+      status,
+      target && !target.roomId ? "Practice mode live." : null
+    );
+    return;
+  }
+
+  if (client.incomingInviteFrom) {
+    const inviter = clients.get(client.incomingInviteFrom);
+    clearInvitePair(
+      inviter,
+      client,
+      inviter && !inviter.roomId ? "Practice mode live." : null,
+      status
+    );
+    return;
+  }
+
+  if (status) {
+    client.status = status;
+    sendSnapshot(client);
+  }
+}
+
+function startLiveArena(inviter, target) {
+  if (!socketIsOpen(inviter) || !socketIsOpen(target) || inviter.roomId || target.roomId) {
+    clearInvitePair(inviter, target, "Practice mode live.", "Practice mode live.");
+    return;
+  }
+
+  const room = {
+    id: crypto.randomUUID(),
+    players: [inviter, target],
+    state: "running",
+    resetAt: 0
+  };
+
+  inviter.roomId = room.id;
+  target.roomId = room.id;
+  inviter.status = "1v1 started. Right click or W to bite.";
+  target.status = "1v1 started. Right click or W to bite.";
+  spawnRoom(room);
+  rooms.set(room.id, room);
+  sendSnapshot(inviter);
+  sendSnapshot(target);
+}
+
+function handleInvitePacket(client) {
   if (!socketIsOpen(client)) {
     return;
   }
@@ -201,20 +259,55 @@ function queueClient(client, status = "Waiting for another dragon...") {
     return;
   }
 
-  if (client.queued) {
-    client.status = "Searching for a dragon duel...";
+  if (client.incomingInviteFrom) {
+    const inviter = clients.get(client.incomingInviteFrom);
+    if (!inviter || inviter.outgoingInviteTo !== client.id) {
+      clearClientInvites(client, "Practice mode live.");
+      return;
+    }
+
+    startLiveArena(inviter, client);
+    return;
+  }
+
+  if (client.outgoingInviteTo) {
+    client.status = "Waiting for the other dragon to accept.";
     sendSnapshot(client);
     return;
   }
 
-  if (!client.queued) {
-    waitingQueue.push(client);
-    client.queued = true;
+  const target = previewOpponentFor(client);
+  if (!target) {
+    client.status = "No other dragon is available right now.";
+    sendSnapshot(client);
+    return;
   }
 
-  client.status = status;
-  pairWaitingClients();
+  if (target.incomingInviteFrom || target.outgoingInviteTo) {
+    client.status = "That dragon is busy right now.";
+    sendSnapshot(client);
+    return;
+  }
+
+  client.outgoingInviteTo = target.id;
+  client.inviteExpiresAt = Date.now() + INVITE_TIMEOUT_MS;
+  target.incomingInviteFrom = client.id;
+  target.inviteExpiresAt = client.inviteExpiresAt;
+  client.status = "1v1 request sent.";
+  target.status = "Incoming 1v1 request.";
   sendSnapshot(client);
+  sendSnapshot(target);
+}
+
+function expireInvites(now) {
+  for (const client of clients.values()) {
+    if (!client.outgoingInviteTo || !client.inviteExpiresAt || client.inviteExpiresAt > now) {
+      continue;
+    }
+
+    const target = clients.get(client.outgoingInviteTo);
+    clearInvitePair(client, target, "Invite expired.", target ? "Invite expired." : null);
+  }
 }
 
 function clampToArena(dragon) {
@@ -252,7 +345,7 @@ function updateDragon(client, dt) {
   const distance = direction.length;
   const wantsBoost = client.boost && dragon.water > 0.5;
   const maxSpeed = dragon.baseSpeed * (wantsBoost ? BOOST_MULTIPLIER : 1);
-  const targetSpeed = Math.min(maxSpeed, distance / POSITION_LERP_SECONDS);
+  const targetSpeed = Math.min(maxSpeed, distance / MOVEMENT_RAMP_SECONDS);
   const accel = wantsBoost ? BOOST_ACCEL : NORMAL_ACCEL;
   const drag = wantsBoost ? BOOST_DRAG : NORMAL_DRAG;
   const easing = 1 - Math.exp(-accel * dt);
@@ -279,24 +372,14 @@ function updateDragon(client, dt) {
     dragon.angle = Math.atan2(dragon.vy, dragon.vx);
   }
 
-  const inWater = distanceToZone(dragon, WATER_ZONE) <= WATER_ZONE.radius - dragon.radius * 0.15;
-  const inHeal = distanceToZone(dragon, HEAL_ZONE) <= HEAL_ZONE.radius - dragon.radius * 0.1;
-
   if (wantsBoost && distance > 0.001) {
-    dragon.water = Math.max(0, dragon.water - 24 * dt);
+    dragon.water = Math.max(0, dragon.water - WATER_BOOST_DRAIN_PER_SECOND * dt);
   }
 
-  if (inWater) {
-    dragon.water = Math.min(dragon.maxWater, dragon.water + 36 * dt);
-  }
-
-  if (inHeal) {
-    dragon.health = Math.min(dragon.maxHealth, dragon.health + 13 * dt);
-  }
-
+  dragon.water = Math.min(dragon.maxWater, dragon.water + WATER_REGEN_PER_SECOND * dt);
   dragon.boosting = wantsBoost && distance > 0.001;
   dragon.boostVisual = approach(dragon.boostVisual, dragon.boosting ? 1 : 0, 10, dt);
-  dragon.healVisual = approach(dragon.healVisual, inHeal ? 1 : 0, 9, dt);
+  dragon.healVisual = approach(dragon.healVisual, 0, 9, dt);
 
   clampToArena(dragon);
 }
@@ -318,21 +401,26 @@ function tryBite(attacker, defender, dt) {
     defender.dragon.x - attacker.dragon.x,
     defender.dragon.y - attacker.dragon.y
   );
-  const facingX = Math.cos(attacker.dragon.angle);
-  const facingY = Math.sin(attacker.dragon.angle);
+  const attackerFacingX = Math.cos(attacker.dragon.angle);
+  const attackerFacingY = Math.sin(attacker.dragon.angle);
+  const defenderFacingX = Math.cos(defender.dragon.angle);
+  const defenderFacingY = Math.sin(defender.dragon.angle);
   const distance = biteVector.length;
-  const alignment = biteVector.x * facingX + biteVector.y * facingY;
+  const attackerAlignment = biteVector.x * attackerFacingX + biteVector.y * attackerFacingY;
+  const tailVectorX = attacker.dragon.x - defender.dragon.x;
+  const tailVectorY = attacker.dragon.y - defender.dragon.y;
+  const tailDirection = normalize(tailVectorX, tailVectorY);
+  const tailAlignment = tailDirection.x * defenderFacingX + tailDirection.y * defenderFacingY;
 
-  if (distance > BITE_RANGE || alignment < 0.12) {
+  if (distance > BITE_RANGE || attackerAlignment < 0.12 || tailAlignment > -0.2) {
     return;
   }
 
   attacker.biteCooldown = BITE_COOLDOWN;
   attacker.roundBites += 1;
   defender.dragon.health = Math.max(0, defender.dragon.health - BITE_DAMAGE);
-  attacker.dragon.health = Math.min(attacker.dragon.maxHealth, attacker.dragon.health + BITE_HEAL);
-  attacker.status = "Bite landed.";
-  defender.status = "You were bitten.";
+  attacker.status = "Tail bite landed.";
+  defender.status = "Your tail was bitten.";
 }
 
 function finishRound(room, winner, loser) {
@@ -379,9 +467,13 @@ function updateSoloClient(client, dt) {
   }
 
   updateDragon(client, dt);
-  client.status = client.queued
-    ? "Searching for a dragon duel..."
-    : "Practice mode live. Press Q or Invite for 1v1.";
+  if (client.incomingInviteFrom) {
+    client.status = "Incoming 1v1 request.";
+  } else if (client.outgoingInviteTo) {
+    client.status = "Waiting for the other dragon to accept.";
+  } else {
+    client.status = "Practice mode live.";
+  }
 }
 
 function serializeDragon(dragon) {
@@ -408,18 +500,20 @@ function sendSnapshot(client) {
     return;
   }
 
-  const opponent = opponentFor(client);
+  const roomOpponent = opponentFor(client);
+  const opponent = roomOpponent || previewOpponentFor(client);
   const payload = {
     status: client.status,
-    phase: client.roomId ? "arena" : "practice",
-    queued: client.queued,
+    phase: roomOpponent ? "arena" : "practice",
+    incomingInvite: client.incomingInviteFrom != null,
+    outgoingInvite: client.outgoingInviteTo != null,
     player: serializeDragon(client.dragon),
     opponent: opponent && opponent.dragon ? serializeDragon(opponent.dragon) : null,
     round: {
       wins: client.wins,
       losses: client.losses,
       bites: client.roundBites,
-      opponentBites: opponent ? opponent.roundBites : 0
+      opponentBites: roomOpponent ? roomOpponent.roundBites : 0
     }
   };
 
@@ -431,7 +525,7 @@ function cleanupClient(client) {
     return;
   }
 
-  removeFromQueue(client);
+  clearClientInvites(client);
 
   const room = client.roomId ? rooms.get(client.roomId) : null;
   if (room) {
@@ -439,7 +533,7 @@ function cleanupClient(client) {
     rooms.delete(room.id);
     if (opponent) {
       opponent.roomId = null;
-      opponent.status = "Opponent left. Press Q to queue again.";
+      opponent.status = "Opponent left. Practice mode live.";
       spawnPracticeDragon(opponent);
       sendSnapshot(opponent);
     }
@@ -471,7 +565,7 @@ function handlePacket(client, message) {
       client.secondary = view.byteLength >= 2 && view.getUint8(1) === 1;
       break;
     case PACKET_INVITE_1V1:
-      queueClient(client, "Searching for a dragon duel...");
+      handleInvitePacket(client);
       break;
     case PACKET_RESIZE:
       break;
@@ -504,13 +598,15 @@ wss.on("connection", (ws) => {
     id: crypto.randomUUID(),
     ws,
     roomId: null,
-    queued: false,
-    status: "Practice mode live. Press Q or Invite for 1v1.",
+    status: "Practice mode live.",
     dragon: null,
     targetX: ARENA.x,
     targetY: ARENA.y,
     boost: false,
     secondary: false,
+    incomingInviteFrom: null,
+    outgoingInviteTo: null,
+    inviteExpiresAt: 0,
     biteCooldown: 0,
     wins: 0,
     losses: 0,
@@ -541,6 +637,7 @@ wss.on("connection", (ws) => {
 setInterval(() => {
   const dt = 1 / TICK_RATE;
   tickCounter += 1;
+  expireInvites(Date.now());
 
   for (const client of clients.values()) {
     if (!client.roomId) {

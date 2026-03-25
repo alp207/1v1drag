@@ -26,16 +26,20 @@ const GRID_SIZE = 30;
 const WORLD_WIDTH = 7200;
 const WORLD_HEIGHT = 5200;
 const ARENA = { x: WORLD_WIDTH / 2, y: WORLD_HEIGHT / 2, radius: 1550 };
-const WATER_ZONE = { x: ARENA.x - 360, y: ARENA.y + 340, radius: 210 };
-const HEAL_ZONE = { x: ARENA.x + 390, y: ARENA.y - 300, radius: 180 };
 const PLAYER_RADIUS = 46;
-const PLAYER_SPEED = 270;
-const BOOST_MULTIPLIER = 1.82;
+const PLAYER_SPEED = 150;
+const BOOST_MULTIPLIER = 1.2;
 const POSITION_LERP_SECONDS = 0.175;
-const NORMAL_ACCEL = 16;
-const BOOST_ACCEL = 18;
-const NORMAL_DRAG = 8;
-const BOOST_DRAG = 6;
+const MOVEMENT_RAMP_SECONDS = 0.42;
+const NORMAL_ACCEL = 10;
+const BOOST_ACCEL = 12;
+const NORMAL_DRAG = 10;
+const BOOST_DRAG = 8;
+const WATER_REGEN_PER_SECOND = 8;
+const WATER_BOOST_DRAIN_PER_SECOND = 16;
+const BITE_RANGE = 122;
+const BITE_DAMAGE = 10;
+const BITE_COOLDOWN_MS = 420;
 const SPRITE_ROTATION = -Math.PI / 2;
 const PACKET_POINTER = 0x05;
 const PACKET_RESIZE = 0x11;
@@ -82,6 +86,8 @@ const state = {
     connected: false,
     remoteAuthority: false,
     reconnectTimer: null,
+    incomingInvite: false,
+    outgoingInvite: false,
     lastTargetX: NaN,
     lastTargetY: NaN
   }
@@ -212,9 +218,22 @@ function showConnecting(show) {
   connectingBanner.classList.toggle("hidden", !show);
 }
 
-function syncInviteButton(queued = false, inArena = false) {
-  inviteButton.disabled = queued || inArena;
-  inviteButton.textContent = inArena ? "1v1 Live" : queued ? "Searching..." : "Invite for 1v1";
+function syncInviteButton() {
+  const inArena = state.network.remoteAuthority && state.opponent;
+  const incomingInvite = state.network.incomingInvite;
+  const outgoingInvite = state.network.outgoingInvite;
+  const offline = !state.network.connected;
+
+  inviteButton.disabled = inArena || (outgoingInvite && !incomingInvite);
+  inviteButton.textContent = inArena
+    ? "1v1 Live"
+    : incomingInvite
+      ? "Accept 1v1"
+      : outgoingInvite
+        ? "Invite Sent"
+        : offline
+          ? "1v1 Offline"
+          : "Invite for 1v1";
 }
 
 function normalizeServerUrl(url) {
@@ -372,22 +391,23 @@ function spawnDragon() {
 
   state.camera.x = state.player.x;
   state.camera.y = state.player.y;
-  state.camera.zoom = 1.38;
-  state.camera.targetZoom = 1.38;
+  state.camera.zoom = 1.14;
+  state.camera.targetZoom = 1.14;
 
   setStatus("Dragon spawned. Mouse to move, left click or Space to boost, Q to invite for 1v1.");
   syncHud();
+  syncInviteButton();
 }
 
 function resetArena() {
   if (state.network.connected && state.network.remoteAuthority) {
-    setStatus("Live arena resets on the server. Press Q to queue again if you need a new 1v1.");
+    setStatus("Live arena resets on the server.");
     return;
   }
 
   spawnDragon();
   if (state.network.connected) {
-    setStatus("Arena reset. Water and health restored.");
+    setStatus("Arena reset.");
   }
 }
 
@@ -401,16 +421,16 @@ function updateLocalDragon(dt) {
   const previousY = dragon.y;
   const targetX = state.pointer.hasPointer
     ? state.pointer.worldX
-    : dragon.x + Math.cos(dragon.angle) * 160;
+    : dragon.x + Math.cos(dragon.angle) * 120;
   const targetY = state.pointer.hasPointer
     ? state.pointer.worldY
-    : dragon.y + Math.sin(dragon.angle) * 160;
+    : dragon.y + Math.sin(dragon.angle) * 120;
 
   const direction = normalize(targetX - dragon.x, targetY - dragon.y);
   const distance = direction.length;
   const wantsBoost = state.input.boost && dragon.water > 0.5;
   const maxSpeed = dragon.baseSpeed * (wantsBoost ? BOOST_MULTIPLIER : 1);
-  const targetSpeed = Math.min(maxSpeed, distance / POSITION_LERP_SECONDS);
+  const targetSpeed = Math.min(maxSpeed, distance / MOVEMENT_RAMP_SECONDS);
   const accel = wantsBoost ? BOOST_ACCEL : NORMAL_ACCEL;
   const drag = wantsBoost ? BOOST_DRAG : NORMAL_DRAG;
   const easing = 1 - Math.exp(-accel * dt);
@@ -437,24 +457,14 @@ function updateLocalDragon(dt) {
     dragon.angle = Math.atan2(dragon.vy, dragon.vx);
   }
 
-  const inWater = distanceToZone(dragon, WATER_ZONE) <= WATER_ZONE.radius - dragon.radius * 0.15;
-  const inHeal = distanceToZone(dragon, HEAL_ZONE) <= HEAL_ZONE.radius - dragon.radius * 0.1;
-
   if (wantsBoost && distance > 0.001) {
-    dragon.water = Math.max(0, dragon.water - 24 * dt);
+    dragon.water = Math.max(0, dragon.water - WATER_BOOST_DRAIN_PER_SECOND * dt);
   }
 
-  if (inWater) {
-    dragon.water = Math.min(dragon.maxWater, dragon.water + 36 * dt);
-  }
-
-  if (inHeal) {
-    dragon.health = Math.min(dragon.maxHealth, dragon.health + 13 * dt);
-  }
-
+  dragon.water = Math.min(dragon.maxWater, dragon.water + WATER_REGEN_PER_SECOND * dt);
   dragon.boosting = wantsBoost && distance > 0.001;
   dragon.boostVisual = approach(dragon.boostVisual, dragon.boosting ? 1 : 0, 10, dt);
-  dragon.healVisual = approach(dragon.healVisual, inHeal ? 1 : 0, 9, dt);
+  dragon.healVisual = approach(dragon.healVisual, 0, 9, dt);
 
   clampToArena(dragon);
 }
@@ -467,9 +477,9 @@ function updateCamera(dt) {
     return;
   }
 
-  state.camera.x = approach(state.camera.x, state.player.x, 8, dt);
-  state.camera.y = approach(state.camera.y, state.player.y, 8, dt);
-  state.camera.targetZoom = state.player.boosting ? 1.27 : 1.38;
+  state.camera.x = approach(state.camera.x, state.player.x, 7, dt);
+  state.camera.y = approach(state.camera.y, state.player.y, 7, dt);
+  state.camera.targetZoom = state.player.boosting ? 1.08 : 1.14;
   state.camera.zoom = approach(state.camera.zoom, state.camera.targetZoom, 4.4, dt);
 }
 
@@ -663,8 +673,6 @@ function draw() {
   drawWorld();
   drawGrid();
   drawArena();
-  drawZone(WATER_ZONE, "rgba(90, 203, 255, 0.55)", "rgba(18, 77, 108, 0.2)", "Water");
-  drawZone(HEAL_ZONE, "rgba(135, 255, 219, 0.38)", "rgba(30, 110, 82, 0.16)", "Heal");
   drawDragon(state.opponent, "#ff9a6b", 0.9);
   drawDragon(state.player, "#65fff0", 1);
   ctx.restore();
@@ -767,8 +775,8 @@ function sendInvitePacket() {
     view.setUint8(1, 0);
   });
 
-  syncInviteButton(true, false);
-  setStatus("Searching for a dragon duel...");
+  syncInviteButton();
+  setStatus(state.network.incomingInvite ? "Incoming 1v1 request." : "1v1 request sent.");
 }
 
 function releaseAllActions() {
@@ -813,11 +821,14 @@ function connectToServer(url, isReconnect = false) {
 
   state.network.connected = false;
   state.network.remoteAuthority = false;
+  state.network.incomingInvite = false;
+  state.network.outgoingInvite = false;
   state.network.url = trimmedUrl;
 
   if (!trimmedUrl) {
     setConnection("Practice only");
     showConnecting(false);
+    syncInviteButton();
     return;
   }
 
@@ -839,8 +850,8 @@ function connectToServer(url, isReconnect = false) {
       setConnection("Connected");
       showConnecting(false);
       sendResizePacket();
-      syncInviteButton(false, false);
-      setStatus("Connected. Practice mode live. Press Q or Invite for 1v1.");
+      syncInviteButton();
+      setStatus("Connected. Practice mode live.");
     });
 
     socket.addEventListener("close", () => {
@@ -851,9 +862,11 @@ function connectToServer(url, isReconnect = false) {
       state.network.socket = null;
       state.network.connected = false;
       state.network.remoteAuthority = false;
+      state.network.incomingInvite = false;
+      state.network.outgoingInvite = false;
       setConnection(trimmedUrl ? "Disconnected" : "Practice only");
       showConnecting(false);
-      syncInviteButton(false, false);
+      syncInviteButton();
       if (state.network.desiredUrl) {
         setStatus("Live arena disconnected. Reconnecting...");
         scheduleReconnect();
@@ -867,9 +880,11 @@ function connectToServer(url, isReconnect = false) {
 
       state.network.connected = false;
       state.network.remoteAuthority = false;
+      state.network.incomingInvite = false;
+      state.network.outgoingInvite = false;
       setConnection("Connection error");
       showConnecting(false);
-      syncInviteButton(false, false);
+      syncInviteButton();
       setStatus("Could not reach the live arena yet. It may still be waking up.");
     });
 
@@ -890,9 +905,11 @@ function connectToServer(url, isReconnect = false) {
   } catch (_error) {
     state.network.connected = false;
     state.network.remoteAuthority = false;
+    state.network.incomingInvite = false;
+    state.network.outgoingInvite = false;
     setConnection("Connection error");
     showConnecting(false);
-    syncInviteButton(false, false);
+    syncInviteButton();
     setStatus("Could not reach the live arena yet. It may still be waking up.");
     scheduleReconnect();
   }
@@ -907,7 +924,9 @@ function applyServerMessage(message) {
     setStatus(message.status);
   }
 
-  syncInviteButton(message.queued === true, message.phase === "arena");
+  state.network.incomingInvite = message.incomingInvite === true;
+  state.network.outgoingInvite = message.outgoingInvite === true;
+  syncInviteButton();
 
   if (message.round && typeof message.round === "object") {
     if (Number.isFinite(message.round.wins)) {
@@ -959,12 +978,12 @@ function startPractice() {
 function hydrateConnectionState() {
   if (getConfiguredServerUrl()) {
     setConnection("Live ready");
-    syncInviteButton(false, false);
+    syncInviteButton();
     return;
   }
 
   setConnection("Practice only");
-  syncInviteButton(false, false);
+  syncInviteButton();
 }
 
 window.addEventListener("resize", resizeCanvas);
